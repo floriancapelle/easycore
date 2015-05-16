@@ -3,7 +3,7 @@
  *
  * @copyright:      Copyright © Florian Capelle
  * @author:         Florian Capelle <mail@floriancapelle.de>
- * @version         0.8.0
+ * @version         0.8.1
  * @license         MIT License
  *
  * @description     Simple scalable application structure.
@@ -158,7 +158,7 @@
          * Default configuration
          * @namespace
          * @property {object} defaults
-         * @property {bool} defaults.debug - expose internal modules, extensions, sandboxes - NOT RECOMMENDED FOR PRODUCTION
+         * @property {bool} defaults.debug - expose internal modules, extensions - NOT RECOMMENDED FOR PRODUCTION
          * @property {bool} defaults.logErrorsViaConsole - use log errors in try-catch statements via console (set to false when using a separate logging extension)
          * @property {object} defaults.modules - module configuration pool, if required, not recommended here, define separately in each module
          * @property {object} defaults.extensions - extension configuration pool, if required, not recommended here, define separately in each extension
@@ -177,9 +177,20 @@
         var modules = {};
         /** @type {object} - extension pool, extensions will be pushed in here */
         var extensions = {};
+        /** @type {object} - sandbox mediator, save it to keep the channel */
+        var sandboxMediator;
 
         /** @constant {string} - Current version */
-        var VERSION = "0.8.0";
+        var VERSION = "0.8.1";
+
+        /** @type {string[]} - module types to register and their callback to invoke on init.
+         * can be extended with extensions pushing more pairs in the map.
+         * BEWARE: functions will be invoked with core as context.
+         */
+        this.moduleTypeMap = {
+            standard: registerStandardModule,
+            extension: registerExtension
+        };
 
         /**
          * Initialization
@@ -197,32 +208,24 @@
                 this.conf = conf;
             }
 
-            // Initialize extensions
-            var extension;
-            for ( var extensionId in extensions ) {
-                extension = extensions[extensionId];
-
-                try {
-                    extension = extension(this, conf.extensions[extensionId]);
-                } catch ( err ) {
-                    if ( conf.logErrorsViaConsole === true ) {
-                        console.log(err);
-                    }
-                    this.trigger('error', 'init', extensionId, err);
-                }
-            }
+            // Create the sandbox mediator
+            sandboxMediator = new Mediator({exposeChannel: conf.debug});
 
             // Initialize modules
             var module;
             for ( var moduleId in modules ) {
                 module = modules[moduleId];
 
-                // init the module and pass a new sandbox and the module configuration
+                // module already instantiated
                 if ( module.instance !== null ) break;
 
                 // Create a new sandbox instance
-                var sandbox = new this.Sandbox(conf.Sandbox);
-                // just for comprehension
+                var sandbox = new self.Sandbox();
+
+                // append the sandbox mediator to enable event management and keep the private channel
+                extend(sandbox, sandboxMediator);
+
+                // just for comprehension and debugging
                 sandbox._moduleId = moduleId;
 
                 if ( conf.debug === true ) {
@@ -303,44 +306,88 @@
         /**
          * Register a module
          *
-         * @param {string} moduleId - module id
-         * @param {function} creator - module creator
-         * @returns {object} this
+         * @param {string} id
+         * @param {function} creator
+         * @param {object} conf - actually redundant as the variable already
+         *                        exists in this scope, completion reasons only
+         * @returns void
          */
-        function registerModule( moduleId, creator ) {
-            if ( getType(moduleId) != 'string' || !moduleId.length || modules[moduleId] ) {
-                this.trigger('warning', 'registerModule', 'Given module id is not of type string, empty or exists already: ' + moduleId);
-                return this;
-            }
-            if ( getType(creator) != 'function' ) {
-                this.trigger('warning', 'registerModule', 'Given creator not of type function: ' + moduleId);
+        function registerStandardModule( id, creator, conf ) {
+            if ( modules[id] ) {
+                this.trigger('warning', 'registerStandardModule', 'Given id exists already: ' + id);
+                return;
             }
 
-            modules[moduleId] = {
+            modules[id] = {
                 creator: creator,
                 instance: null
             };
-
-            return this;
         }
 
         /**
          * Register an extension
          *
-         * @param {string} extensionId - extension id
-         * @param {function} creator - extension creator
+         * Will be invoked immediately.
+         * Use core callbacks like afterInit to react and prepare the extension or to extend it.
+         *
+         * @param {string} id
+         * @param {function} creator
+         * @param {object} conf - actually redundant as the variable already
+         *                        exists in this scope, completion reasons only
+         * @returns void
+         */
+        function registerExtension( id, creator, conf ) {
+            if ( extensions[id] ) {
+                this.trigger('error', 'registerExtension', 'Given id exists already: ' + id);
+                return;
+            }
+
+            // Invoke extension
+            try {
+                extensions[id] = new creator(this, conf.extensions[id], {
+                    sandboxMediator: sandboxMediator,
+                    coreSettings: conf
+                });
+            } catch ( err ) {
+                if ( conf.logErrorsViaConsole === true ) {
+                    console.log(err);
+                }
+                this.trigger('error', 'registerExtension', id, err);
+            }
+        }
+
+        /**
+         * Register a module/extension/function/*
+         *
+         * @param {string} id
+         * @param {string|function} [arg1=standard] - type or creator
+         * @param {function} arg2 - creator
          * @returns {object} this
          */
-        function registerExtension( extensionId, creator ) {
-            if ( getType(extensionId) != 'string' || !extensionId.length || extensions[extensionId] ) {
-                this.trigger('error', 'registerExtension', 'Given extension id is not of type string, empty or exists already: ' + extensionId);
+        function register( id, arg1, arg2 ) {
+            var type,
+                creator;
+
+            if ( getType(arg1) == "function" ) {
+                type = 'standard';
+                creator = arg1;
+            } else if ( getType(arg1) == "string" && !self.moduleTypeMap[arg1] ) {
+                this.trigger('warning', 'register', 'Given module type does not exist: ' + arg1 + '(id: ' + id + ')');
+            } else {
+                type = arg1;
+                creator = arg2;
+            }
+
+            if ( getType(id) != 'string' || !id.length ) {
+                this.trigger('warning', 'register', 'Given id is not of type string or empty: ' + id);
                 return this;
             }
             if ( getType(creator) != 'function' ) {
-                this.trigger('error', 'registerExtension', 'Given creator not of type function: ' + extensionId);
+                this.trigger('warning', 'register', 'Given creator not of type function: ' + id);
             }
 
-            extensions[extensionId] = creator;
+            // invoke (custom) register callback with core as context
+            self.moduleTypeMap[type].call(this, id, creator, conf);
 
             return this;
         }
@@ -391,6 +438,9 @@
             }
         }
 
+        // append mediator to enable event management
+        extend(EasyCore.prototype, new Mediator({exposeChannel: conf.debug}));
+
         return extend(this, {
             VERSION: VERSION,
 
@@ -403,39 +453,18 @@
             isObject: isObject,
             getType: getType,
             isPlainObject: isPlainObject,
-            registerModule: registerModule,
-            registerExtension: registerExtension,
+            register: register,
             init: init,
             start: start,
             stop: stop
         });
     };
-    // append mediator to enable event management
-    extend(EasyCore.prototype, new Mediator({channelId: 'core'}));
 
     /**
      * EasyCore Sandbox
-     *
-     * @param {object} [settings] - settings for the sandbox
+     * Reference only, all methods and properties should be added via extensions
      */
-    EasyCore.prototype.Sandbox = function( settings ) {
-        /**
-         * Default configuration
-         * @namespace
-         * @property {object} defaults
-         */
-        var defaults = {
-
-        };
-
-        var self = this;
-        /** @type {object} - merged conf */
-        var conf = extend(true, {}, defaults, settings);
-
-        // append frequently used functions here if more comfortable
-    };
-    // append mediator to enable event management
-    extend(EasyCore.prototype.Sandbox.prototype, new Mediator({channelId: 'sandbox'}));
+    EasyCore.prototype.Sandbox = function() {};
 
     // Expose EasyCore
     root.EasyCore = EasyCore;
